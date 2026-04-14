@@ -1,0 +1,23 @@
+# 자격증명/세션
+.env
+.env.*
+storage_state.json
+*.cookies
+
+# 진단/산출물
+recon/
+output/
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# OS / 에디터
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
