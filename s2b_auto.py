@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-S2B 자동화 — 로그인 → 검색 → 상세 → [담기] (수량 입력 + fnSave) → 검증.
+S2B 자동화 — 로그인 → 중복확인 → 검색 → 상세 → [담기] (수량 입력 + fnSave) → 검증.
 
 사용:
   python s2b_auto.py --sheet "<gsheet-url>" --account personal --mode dry
@@ -14,6 +14,7 @@ import getpass
 import io
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -89,11 +90,9 @@ def login(page, account: str, sid: str, spw: str, recon_dir: Path) -> bool:
     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
     time.sleep(1.5)
 
-    # 다이얼로그 자동 처리
     dialog_log = []
     page.on("dialog", lambda d: (dialog_log.append((d.type, d.message)), d.accept()))
 
-    # 탭 활성화 (수요기관은 기본 활성)
     if cfg["tab"] != "#sclogin":
         try:
             page.locator(f"a[href='{cfg['tab']}']").first.click()
@@ -112,13 +111,11 @@ def login(page, account: str, sid: str, spw: str, recon_dir: Path) -> bool:
     time.sleep(2)
     snap(page, "10_after_login", recon_dir)
 
-    # 로그인 실패 다이얼로그 확인
     for dtype, msg in dialog_log:
         if "실패" in msg:
             print(f"  !! 로그인 실패: {msg[:80]}")
             return False
 
-    # 비번변경 안내 페이지 패스
     if "pwd_changeinfo" in page.url:
         print("  pwd_changeinfo → modifyNext()")
         try:
@@ -133,6 +130,21 @@ def login(page, account: str, sid: str, spw: str, recon_dir: Path) -> bool:
     print(f"[login] success={ok} url={page.url}")
     return ok
 
+# ---------------- 중복 확인 ----------------
+def get_registered_item_nos(page, account: str) -> set:
+    """현재 접수내역(개인) 또는 장바구니(학교)에 있는 물품번호 집합 반환."""
+    url = EST_LIST_URL if account == "personal" else CART_URL_SCHOOL
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(2)
+        body = page.content()
+        # S2B 물품번호는 주로 15자리 숫자
+        nos = set(re.findall(r'\b\d{15}\b', body))
+        return nos
+    except Exception as e:
+        print(f"  [warn] 기등록 목록 조회 실패: {e}")
+        return set()
+
 # ---------------- 담기 ----------------
 def add_one(page, item: dict, idx: int, recon_dir: Path) -> dict:
     print(f"\n[item {idx}] no={item['no']} qty={item['qty']} name={item.get('name','')}")
@@ -143,15 +155,13 @@ def add_one(page, item: dict, idx: int, recon_dir: Path) -> dict:
     time.sleep(2.5)
     snap(page, f"21_detail_{idx}_{item['no']}", recon_dir)
 
-    # 상세 페이지가 정상 로드됐는지 (qnt 인풋 존재 확인)
     if page.locator("#qnt").count() == 0:
-        out["reason"] = "상세페이지 #qnt 없음 (물품번호 무효 가능)"
+        out["reason"] = "상세페이지 #qnt 없음 (물품번호 무효 또는 단종 가능)"
         return out
 
     page.locator("#qnt").fill(str(item["qty"]))
     snap(page, f"22_qnt_{idx}", recon_dir)
 
-    # popup capture
     popup_holder = {"p": None}
     page.once("popup", lambda p: popup_holder.__setitem__("p", p))
 
@@ -161,16 +171,17 @@ def add_one(page, item: dict, idx: int, recon_dir: Path) -> dict:
         out["reason"] = f"fnSave 호출 예외: {e}"
         return out
 
-    time.sleep(3)
+    # 팝업이 열릴 시간을 충분히 대기
+    time.sleep(4)
     snap(page, f"23_after_fnSave_{idx}", recon_dir)
 
     if popup_holder["p"]:
         pop = popup_holder["p"]
         try:
-            pop.wait_for_load_state("networkidle", timeout=10000)
+            pop.wait_for_load_state("networkidle", timeout=15000)
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(2)
         try:
             pop.screenshot(path=str(recon_dir / f"24_popup_{idx}.png"), full_page=True)
             content = pop.content()
@@ -180,7 +191,9 @@ def add_one(page, item: dict, idx: int, recon_dir: Path) -> dict:
             else:
                 out["reason"] = "팝업 결과 확인 필요"
         except Exception as e:
-            out["reason"] = f"popup 처리 예외: {e}"
+            # 팝업이 빠르게 닫혔을 가능성 — 검증 단계에서 재판정
+            out["status"] = "CHECK"
+            out["reason"] = f"팝업 캡처 실패(검증단계 재확인): {e}"
         try:
             pop.close()
         except Exception:
@@ -191,7 +204,7 @@ def add_one(page, item: dict, idx: int, recon_dir: Path) -> dict:
 
 # ---------------- 검증 ----------------
 def verify(page, account: str, items: list, recon_dir: Path) -> dict:
-    """담은 후 목록 페이지에서 우리 물품번호가 보이는지 확인."""
+    """담은 후 목록 페이지에서 물품번호 존재 여부 확인."""
     if account == "personal":
         page.goto(EST_LIST_URL, wait_until="domcontentloaded", timeout=30000)
     else:
@@ -203,16 +216,22 @@ def verify(page, account: str, items: list, recon_dir: Path) -> dict:
     return found
 
 # ---------------- 리포트 ----------------
-def write_report(out_dir: Path, results: list, found: dict, items: list, account: str) -> Path:
+def write_report(out_dir: Path, results: list, found: dict, account: str) -> Path:
     ts = datetime.now().strftime("%Y%m%d_%H%M")
     f = out_dir / f"리포트_{ts}.html"
     rows_html = []
     for r in results:
         no = r["no"]
-        verified = "✅" if found.get(no) else "❌"
+        status = r["status"]
+        if status == "SKIP":
+            verified = "⏭"
+            row_style = ' style="background:#f9f9f9;color:#888"'
+        else:
+            verified = "✅" if found.get(no) else "❌"
+            row_style = ""
         rows_html.append(
-            f"<tr><td>{r['idx']}</td><td>{no}</td><td>{r['name']}</td>"
-            f"<td>{r['qty']}</td><td>{r['status']}</td>"
+            f"<tr{row_style}><td>{r['idx']}</td><td>{no}</td><td>{r['name']}</td>"
+            f"<td>{r['qty']}</td><td>{status}</td>"
             f"<td>{verified}</td><td>{r['reason']}</td></tr>"
         )
     html = f"""<!doctype html><html><head><meta charset="utf-8">
@@ -237,7 +256,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sheet", help="구글시트 URL (export csv 가능해야 함)")
     ap.add_argument("--sheet-name", dest="sheet_name", default="",
-                    help="구글시트 내 탭(시트)명. 지정 시 gviz/tq CSV로 받음. 미지정이면 #gid 또는 첫 시트.")
+                    help="구글시트 내 탭(시트)명. 지정 시 gviz/tq CSV로 받음.")
     ap.add_argument("--csv", help="로컬 CSV 경로")
     ap.add_argument("--account", choices=["school", "personal"], default="personal")
     ap.add_argument("--mode", choices=["dry", "run"], default="dry",
@@ -261,13 +280,12 @@ def main():
     items = (load_items_from_sheet(args.sheet, args.sheet_name) if args.sheet
              else load_items_from_csv(args.csv))
     print(f"[sheet] 로드 {len(items)}건")
-    for it in items[:3]:
+    for it in items[:5]:
         print(f"  preview: {it}")
     if not items:
         print("!! 품목 0건. 종료.")
         return
 
-    # dry-run: 1건만
     if args.mode == "dry":
         items = items[:1]
         print(f"[mode] dry-run → 1건만 진행")
@@ -292,16 +310,44 @@ def main():
                 return
             ctx.storage_state(path=str(storage_state))
 
+            # 중복 방지: 로그인 직후 기등록 물품 확인
+            print("\n[dup-check] 기등록 물품 확인 중...")
+            registered_nos = get_registered_item_nos(page, args.account)
+            print(f"  현재 접수/담기 {len(registered_nos)}건 확인됨")
+            snap(page, "15_precheck_list", recon_dir)
+
             results = []
             for i, it in enumerate(items, 1):
+                if it["no"] in registered_nos:
+                    print(f"  [skip-dup] no={it['no']} name={it.get('name','')} → 이미 등록됨, 건너뜀")
+                    results.append({
+                        "idx": i, "no": it["no"], "qty": it["qty"],
+                        "name": it.get("name", ""), "status": "SKIP",
+                        "reason": "이미 접수/담기됨 (중복 방지)"
+                    })
+                    continue
                 results.append(add_one(page, it, i, recon_dir))
 
+            # 최종 검증
+            non_skip_items = [it for it in items if it["no"] not in registered_nos]
             found = verify(page, args.account, items, recon_dir)
-            report = write_report(out_dir, results, found, items, args.account)
+
+            # CHECK 상태 재판정: 팝업 캡처 실패했지만 접수내역에 있으면 OK
+            for r in results:
+                if r["status"] == "CHECK":
+                    if found.get(r["no"]):
+                        r["status"] = "OK"
+                        r["reason"] = "팝업 캡처 실패했으나 접수내역에서 확인됨"
+                    else:
+                        r["status"] = "FAIL"
+
+            report = write_report(out_dir, results, found, args.account)
             print(f"\n[report] {report}")
-            ok_cnt = sum(1 for r in results if r["status"] == "OK"
-                         and found.get(r["no"]))
-            print(f"[summary] PASS {ok_cnt}/{len(results)}")
+
+            ok_cnt   = sum(1 for r in results if r["status"] == "OK" and found.get(r["no"]))
+            skip_cnt = sum(1 for r in results if r["status"] == "SKIP")
+            fail_cnt = sum(1 for r in results if r["status"] == "FAIL")
+            print(f"[summary] OK={ok_cnt}  SKIP(중복)={skip_cnt}  FAIL={fail_cnt}  / 총{len(results)}건")
         finally:
             ctx.tracing.stop(path=str(recon_dir / "trace.zip"))
             browser.close()
