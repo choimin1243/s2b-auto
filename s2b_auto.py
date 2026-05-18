@@ -88,7 +88,7 @@ def login(page, account: str, sid: str, spw: str, recon_dir: Path) -> bool:
     cfg = ACCOUNT_MAP[account]
     print(f"[login] account={account} ({cfg['form']})")
     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-    time.sleep(1.5)
+    time.sleep(0.5)
 
     dialog_log = []
     page.on("dialog", lambda d: (dialog_log.append((d.type, d.message)), d.accept()))
@@ -96,7 +96,7 @@ def login(page, account: str, sid: str, spw: str, recon_dir: Path) -> bool:
     if cfg["tab"] != "#sclogin":
         try:
             page.locator(f"a[href='{cfg['tab']}']").first.click()
-            time.sleep(1)
+            time.sleep(0.3)
         except Exception as e:
             print(f"  탭 클릭 실패: {e}")
 
@@ -105,10 +105,10 @@ def login(page, account: str, sid: str, spw: str, recon_dir: Path) -> bool:
     page.evaluate(f"retrieveLogin2('{cfg['form']}', {cfg['idx']})")
 
     try:
-        page.wait_for_load_state("networkidle", timeout=20000)
+        page.wait_for_load_state("networkidle", timeout=10000)
     except PWTimeout:
         pass
-    time.sleep(2)
+    time.sleep(1)
     snap(page, "10_after_login", recon_dir)
 
     for dtype, msg in dialog_log:
@@ -120,8 +120,8 @@ def login(page, account: str, sid: str, spw: str, recon_dir: Path) -> bool:
         print("  pwd_changeinfo → modifyNext()")
         try:
             page.evaluate("modifyNext()")
-            page.wait_for_load_state("networkidle", timeout=15000)
-            time.sleep(2)
+            page.wait_for_load_state("networkidle", timeout=10000)
+            time.sleep(0.5)
         except Exception as e:
             print(f"  modifyNext 실패: {e}")
         snap(page, "11_after_pw_skip", recon_dir)
@@ -136,7 +136,7 @@ def get_registered_item_nos(page, account: str) -> set:
     url = EST_LIST_URL if account == "personal" else CART_URL_SCHOOL
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(2)
+        time.sleep(1)
         body = page.content()
         # S2B 물품번호는 주로 15자리 숫자
         nos = set(re.findall(r'\b\d{15}\b', body))
@@ -152,7 +152,7 @@ def add_one(page, item: dict, idx: int, recon_dir: Path) -> dict:
            "name": item.get("name", ""), "status": "FAIL", "reason": ""}
 
     page.goto(DETAIL_URL.format(no=item["no"]), wait_until="domcontentloaded", timeout=30000)
-    time.sleep(2.5)
+    time.sleep(1)
     snap(page, f"21_detail_{idx}_{item['no']}", recon_dir)
 
     if page.locator("#qnt").count() == 0:
@@ -171,17 +171,17 @@ def add_one(page, item: dict, idx: int, recon_dir: Path) -> dict:
         out["reason"] = f"fnSave 호출 예외: {e}"
         return out
 
-    # 팝업이 열릴 시간을 충분히 대기
-    time.sleep(4)
+    # 팝업이 열릴 시간을 대기
+    time.sleep(2)
     snap(page, f"23_after_fnSave_{idx}", recon_dir)
 
     if popup_holder["p"]:
         pop = popup_holder["p"]
         try:
-            pop.wait_for_load_state("networkidle", timeout=15000)
+            pop.wait_for_load_state("networkidle", timeout=8000)
         except Exception:
             pass
-        time.sleep(2)
+        time.sleep(0.5)
         try:
             pop.screenshot(path=str(recon_dir / f"24_popup_{idx}.png"), full_page=True)
             content = pop.content()
@@ -209,7 +209,7 @@ def verify(page, account: str, items: list, recon_dir: Path) -> dict:
         page.goto(EST_LIST_URL, wait_until="domcontentloaded", timeout=30000)
     else:
         page.goto(CART_URL_SCHOOL, wait_until="domcontentloaded", timeout=30000)
-    time.sleep(3)
+    time.sleep(1.5)
     snap(page, "30_verify_list", recon_dir)
     body = page.content()
     found = {it["no"]: (body.count(it["no"]) > 0) for it in items}
@@ -299,7 +299,7 @@ def main():
     # 3) 자동화
     storage_state = workdir / "storage_state.json"
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, slow_mo=150)
+        browser = p.chromium.launch(headless=args.headless, slow_mo=50)
         ctx = browser.new_context(viewport={"width": 1440, "height": 900}, locale="ko-KR")
         ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
         page = ctx.new_page()
