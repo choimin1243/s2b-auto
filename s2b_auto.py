@@ -50,6 +50,46 @@ ACCOUNT_MAP = {
     "personal": {"tab": "#prlogin", "form": "personal_loginForm", "idx": 2},
 }
 
+
+def target_list_url(account: str) -> str:
+    """S2B가 실제로 물품을 담는 선택물품함 목록 URL을 반환한다."""
+    return EST_LIST_URL
+
+
+def merge_duplicate_items(items: list) -> list:
+    """같은 물품번호가 여러 행에 있으면 수량을 합산해 한 번만 담는다."""
+    merged = {}
+    order = []
+    for item in items:
+        no = str(item.get("no", "")).strip()
+        if not no:
+            continue
+        qty = int(item.get("qty", 0))
+        if no not in merged:
+            merged[no] = dict(item)
+            merged[no]["no"] = no
+            merged[no]["qty"] = qty
+            rows = item.get("rows") or [item.get("row")]
+            merged[no]["rows"] = [r for r in rows if r is not None]
+            order.append(no)
+            continue
+        merged[no]["qty"] += qty
+        rows = item.get("rows") or [item.get("row")]
+        merged[no].setdefault("rows", []).extend(r for r in rows if r is not None)
+        if not merged[no].get("name") and item.get("name"):
+            merged[no]["name"] = item["name"]
+
+    out = [merged[no] for no in order]
+    duplicates = [item for item in out if len(item.get("rows", [])) > 1]
+    if duplicates:
+        print(f"  [merge-final] 같은 물품번호 {len(duplicates)}종 합산 후 1회만 담기")
+        for item in duplicates:
+            print(
+                f"    no={item['no']} rows={item.get('rows', [])} "
+                f"합산수량={item['qty']} name={item.get('name', '')}"
+            )
+    return out
+
 # ---------------- 로그인 보조 ----------------
 def install_dialog_auto_accept(page):
     """S2B confirm/alert 창을 기록하고 자동 확인한다. 비밀번호는 다루지 않는다."""
@@ -104,7 +144,7 @@ def _wait_for_enter(timeout_seconds: int) -> bool:
 
 
 def manual_login(page, account: str, recon_dir: Path, timeout_seconds: int = 300) -> bool:
-    """브라우저를 열어 사용자가 직접 로그인하게 하고, Enter 이후 로그인 상태를 검증한다."""
+    """브라우저를 열어 사용자가 직접 로그인하게 하고, 로그인 완료를 자동 감지한다."""
     print(f"[login] manual account={account}")
     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
     time.sleep(0.5)
@@ -120,33 +160,30 @@ def manual_login(page, account: str, recon_dir: Path, timeout_seconds: int = 300
     print("\n=== 수동 로그인 필요 ===")
     print("1) 열린 브라우저에서 S2B 아이디/비밀번호를 직접 입력해 로그인하세요.")
     print("2) 비밀번호 변경 안내/알림이 나오면 사용자가 직접 처리하거나 다음에 변경을 누르세요.")
-    print("3) 로그인 완료 후 이 CLI 창으로 돌아와 Enter를 누르세요.")
+    print("3) 로그인 완료가 감지되면 Enter 없이 자동으로 다음 단계로 진행합니다.")
     print(f"   제한시간: {timeout_seconds}초")
 
     start = time.time()
+    last_notice = 0
     while True:
         remaining = max(0, int(timeout_seconds - (time.time() - start)))
         if remaining == 0:
             print("!! 수동 로그인 대기 시간이 초과되었습니다.")
             snap(page, "10_manual_login_timeout", recon_dir)
             return False
-        # 사용자가 엔터를 눌러 명시적으로 이어가게 한다. Windows PowerShell/cmd에서도 동작.
-        if not _wait_for_enter(remaining):
-            print("!! 수동 로그인 대기 시간이 초과되었습니다.")
-            snap(page, "10_manual_login_timeout", recon_dir)
-            return False
         try:
-            page.wait_for_load_state("domcontentloaded", timeout=5000)
+            page.wait_for_load_state("domcontentloaded", timeout=1000)
         except PWTimeout:
             pass
-        time.sleep(0.5)
-        snap(page, "10_after_manual_login", recon_dir)
         ok = is_logged_in(page)
-        print(f"[login] manual success={ok} url={page.url}")
         if ok:
+            snap(page, "10_after_manual_login", recon_dir)
+            print(f"[login] manual success=True url={page.url}")
             return True
-        print("아직 로그인 화면으로 보입니다. 브라우저에서 로그인을 완료한 뒤 다시 Enter를 누르세요.")
-        print(f"남은 시간: {remaining}초")
+        if time.time() - last_notice >= 10:
+            print(f"[login] 로그인 대기 중... 남은 시간: {remaining}초")
+            last_notice = time.time()
+        time.sleep(1)
 
 # ---------------- 유틸 ----------------
 def snap(page, name, root: Path):
@@ -161,13 +198,50 @@ def snap(page, name, root: Path):
         pass
     print(f"  [snap] {name}")
 
+
+def read_registered_nos_from_current_page(page, target_nos=None) -> set:
+    """현재 선택물품함 페이지에서 물품번호를 최대한 보수적으로 읽는다."""
+    targets = set(target_nos or [])
+    found = set()
+    try:
+        records = page.evaluate(
+            """
+            () => Array.from(document.querySelectorAll('input[type="checkbox"]'))
+              .map((cb) => {
+                try { return JSON.parse(cb.value || '{}'); }
+                catch (e) { return {}; }
+              })
+            """
+        )
+        for obj in records:
+            no = str(
+                obj.get("re_estimate_code")
+                or obj.get("f_re_estimate_code")
+                or obj.get("goods_code")
+                or ""
+            ).strip()
+            if no and (not targets or no in targets):
+                found.add(no)
+    except Exception as e:
+        print(f"  [warn] 체크박스 기반 목록 읽기 실패: {e}")
+
+    try:
+        body = page.content()
+        for no in re.findall(r"\b\d{15}\b", body):
+            if not targets or no in targets:
+                found.add(no)
+    except Exception as e:
+        print(f"  [warn] HTML 기반 목록 읽기 실패: {e}")
+    return found
+
+
 def delete_existing_target_items(page, account: str, items: list, recon_dir: Path) -> list:
     """시트 대상 물품번호가 이미 접수/담기 목록에 있으면 삭제한다.
 
     전체 실행에서는 이전 dry 테스트나 과거 실행분이 남아 있으면 합산 수량과 맞지 않을 수 있다.
     그래서 현재 시트에 있는 물품번호만 선택 삭제한 뒤, 병합된 최종 수량으로 다시 담는다.
     """
-    url = EST_LIST_URL if account == "personal" else CART_URL_SCHOOL
+    url = target_list_url(account)
     target_nos = [it["no"] for it in items]
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     time.sleep(1)
@@ -178,7 +252,7 @@ def delete_existing_target_items(page, account: str, items: list, recon_dir: Pat
             (targetNos) => {
               const targets = new Set(targetNos);
               const matched = [];
-              document.querySelectorAll('input[type="checkbox"][id="chk[]"]').forEach((cb) => {
+              document.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
                 try {
                   const obj = JSON.parse(cb.value || '{}');
                   const no = obj.re_estimate_code || obj.f_re_estimate_code || obj.goods_code || '';
@@ -225,17 +299,26 @@ def delete_existing_target_items(page, account: str, items: list, recon_dir: Pat
 # ---------------- 중복 확인 ----------------
 def get_registered_item_nos(page, account: str) -> set:
     """현재 접수내역(개인) 또는 장바구니(학교)에 있는 물품번호 집합 반환."""
-    url = EST_LIST_URL if account == "personal" else CART_URL_SCHOOL
+    url = target_list_url(account)
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=30000)
         time.sleep(1)
-        body = page.content()
-        # S2B 물품번호는 주로 15자리 숫자
-        nos = set(re.findall(r'\b\d{15}\b', body))
-        return nos
+        return read_registered_nos_from_current_page(page)
     except Exception as e:
         print(f"  [warn] 기등록 목록 조회 실패: {e}")
         return set()
+
+
+def is_item_already_registered(page, account: str, item_no: str) -> bool:
+    """추가 직전에 단일 물품번호 존재 여부를 다시 확인해 중복 담기를 막는다."""
+    url = target_list_url(account)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(1)
+        return item_no in read_registered_nos_from_current_page(page, [item_no])
+    except Exception as e:
+        print(f"  [warn] 중복 방지 확인 실패: {e}")
+        return True
 
 # ---------------- 담기 ----------------
 def add_one(page, item: dict, idx: int, recon_dir: Path) -> dict:
@@ -297,10 +380,7 @@ def add_one(page, item: dict, idx: int, recon_dir: Path) -> dict:
 # ---------------- 검증 ----------------
 def verify(page, account: str, items: list, recon_dir: Path) -> dict:
     """담은 후 목록 페이지에서 물품번호 존재 여부 확인."""
-    if account == "personal":
-        page.goto(EST_LIST_URL, wait_until="domcontentloaded", timeout=30000)
-    else:
-        page.goto(CART_URL_SCHOOL, wait_until="domcontentloaded", timeout=30000)
+    page.goto(target_list_url(account), wait_until="domcontentloaded", timeout=30000)
     time.sleep(1.5)
     snap(page, "30_verify_list", recon_dir)
     body = page.content()
@@ -363,7 +443,18 @@ def run_automation(page, account: str, items: list, recon_dir: Path, out_dir: Pa
                 "reason": "이미 접수/담기됨 (중복 방지)"
             })
             continue
+        if is_item_already_registered(page, account, it["no"]):
+            registered_nos.add(it["no"])
+            print(f"  [skip-live-dup] no={it['no']} name={it.get('name','')} → 추가 직전 목록에서 발견, 건너뜀")
+            results.append({
+                "idx": i, "no": it["no"], "qty": it["qty"],
+                "name": it.get("name", ""), "status": "SKIP",
+                "reason": "추가 직전 이미 담긴 항목 확인 (중복 방지)"
+            })
+            continue
         results.append(add_one(page, it, i, recon_dir))
+        if is_item_already_registered(page, account, it["no"]):
+            registered_nos.add(it["no"])
 
     found = verify(page, account, items, recon_dir)
 
@@ -424,6 +515,7 @@ def main():
     # 1) 시트 로드
     items = (load_items_from_sheet(args.sheet, args.sheet_name) if args.sheet
              else load_items_from_csv(args.csv))
+    items = merge_duplicate_items(items)
     print(f"[sheet] 로드 {len(items)}건")
     for it in items[:5]:
         print(f"  preview: {it}")
