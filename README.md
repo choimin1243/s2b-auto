@@ -29,6 +29,8 @@ python s2b_auto.py --sheet "https://docs.google.com/spreadsheets/d/.../edit?gid=
 
 브라우저가 열리면 사용자가 직접 로그인합니다. 로그인 완료가 자동 감지되면 바로 진행됩니다. 자동 감지가 안 되면 실행 폴더에 자동 생성되는 `login_done.bat`를 더블클릭하세요. 그러면 로그인 창은 닫히고 저장된 세션으로 headless 자동 담기가 이어집니다.
 
+Codex에서 실행하는 경우에는 S2B 브라우저에서 로그인을 마친 뒤 Codex 채팅창에 `로그인`이라고 입력해도 됩니다. Codex가 `login_done.signal` 파일을 만들어 주면 자동화가 로그인 완료로 인식하고 물품 담기를 진행합니다.
+
 ### 3) 전체 실행
 
 ```powershell
@@ -41,6 +43,7 @@ python s2b_auto.py --sheet "https://docs.google.com/spreadsheets/d/.../edit?gid=
 - `--mode dry`는 로그인 후 첫 1건을 실제로 담아 검증합니다. 파싱만 보려면 `--preview-only`를 사용하세요.
 - `--manual-login-then-headless`: 로그인만 보이는 브라우저에서 하고 이후 headless 자동 담기로 전환합니다.
 - 로그인 완료 확인용 `login_done.signal`과 `login_done.bat`는 실행할 때 자동으로 준비됩니다. 필요하면 `--login-confirm-file`로 다른 신호 파일 경로를 지정할 수 있습니다.
+- Codex 환경에서는 사용자가 채팅창에 `로그인`, `완료`, `로그인 완료`라고 입력하면 Codex가 `login_done.signal`을 만들어 진행할 수 있도록 `AGENTS.md`에 규칙을 포함했습니다.
 - `--login-only`: 로그인 세션만 저장합니다.
 - `--use-session --headless`: 저장된 세션으로 로그인 없이 headless 실행합니다.
 - 같은 물품번호가 여러 행에 있으면 수량을 합산해 한 번만 담습니다.
