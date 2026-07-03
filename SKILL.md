@@ -63,6 +63,7 @@ The first few rows are scanned for headers. Supported header names include:
 - Name: `물품명`, `품명`, `상품명`, `name`, `품목명`, `제품명`
 
 Rows with blank item numbers are skipped. Quantity must parse to a positive integer.
+If the same item number appears more than once, quantities are always summed and the item is placed once with the combined quantity.
 
 ## Commands
 
@@ -109,8 +110,9 @@ When the script starts a real run:
 6. If the page still looks like the login page, the script asks again until `--login-timeout` expires.
 7. After login, the script saves `storage_state.json`.
 8. With `--manual-login-then-headless`, the visible login browser closes and a headless browser continues the automatic add/verify flow.
-9. After login/session handoff, the script checks existing estimate/cart items and skips already-present item numbers.
-10. For each remaining item, it opens the detail page, sets `#qnt`, calls `fnSave()`, accepts S2B dialogs, and verifies in the estimate/cart list.
+9. After login/session handoff, the script deletes existing estimate/cart rows whose item numbers appear in the current sheet, so prior dry runs or repeated sheet rows do not leave wrong quantities.
+10. It then checks any remaining existing items and skips still-present item numbers.
+11. For each remaining item, it opens the detail page, sets the merged `#qnt`, calls `fnSave()`, accepts S2B dialogs, and verifies in the estimate/cart list.
 
 ## Outputs
 

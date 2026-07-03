@@ -161,6 +161,67 @@ def snap(page, name, root: Path):
         pass
     print(f"  [snap] {name}")
 
+def delete_existing_target_items(page, account: str, items: list, recon_dir: Path) -> list:
+    """시트 대상 물품번호가 이미 접수/담기 목록에 있으면 삭제한다.
+
+    전체 실행에서는 이전 dry 테스트나 과거 실행분이 남아 있으면 합산 수량과 맞지 않을 수 있다.
+    그래서 현재 시트에 있는 물품번호만 선택 삭제한 뒤, 병합된 최종 수량으로 다시 담는다.
+    """
+    url = EST_LIST_URL if account == "personal" else CART_URL_SCHOOL
+    target_nos = [it["no"] for it in items]
+    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    time.sleep(1)
+    snap(page, "14_before_replace_existing", recon_dir)
+    try:
+        matched = page.evaluate(
+            """
+            (targetNos) => {
+              const targets = new Set(targetNos);
+              const matched = [];
+              document.querySelectorAll('input[type="checkbox"][id="chk[]"]').forEach((cb) => {
+                try {
+                  const obj = JSON.parse(cb.value || '{}');
+                  const no = obj.re_estimate_code || obj.f_re_estimate_code || obj.goods_code || '';
+                  if (targets.has(no)) {
+                    cb.checked = true;
+                    matched.push({
+                      no,
+                      qty: obj.estimate_quantity || '',
+                      name: obj.goods_name || '',
+                      rc: obj.rc_estimate_code || ''
+                    });
+                  }
+                } catch (e) {}
+              });
+              return matched;
+            }
+            """,
+            target_nos,
+        )
+    except Exception as e:
+        print(f"  [warn] 기존 항목 선택 실패: {e}")
+        return []
+
+    if not matched:
+        print("  [replace] 시트 물품번호와 겹치는 기존 항목 없음")
+        return []
+
+    print(f"  [replace] 시트와 겹치는 기존 항목 {len(matched)}건 삭제 후 재담기")
+    for m in matched:
+        print(f"    delete no={m.get('no')} qty={m.get('qty')} name={m.get('name')}")
+    try:
+        page.evaluate("estimateSelDelete()")
+        time.sleep(2)
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except PWTimeout:
+            pass
+        snap(page, "14_after_replace_existing", recon_dir)
+    except Exception as e:
+        print(f"  [warn] 기존 항목 삭제 호출 실패: {e}")
+    return matched
+
+
 # ---------------- 중복 확인 ----------------
 def get_registered_item_nos(page, account: str) -> set:
     """현재 접수내역(개인) 또는 장바구니(학교)에 있는 물품번호 집합 반환."""
@@ -284,6 +345,9 @@ th{{background:#f0f0f0}}</style></head>
 
 def run_automation(page, account: str, items: list, recon_dir: Path, out_dir: Path) -> Path:
     """로그인된 page에서 중복 확인 → 담기 → 검증 → 리포트까지 실행한다."""
+    print("\n[replace] 시트 대상 기존 항목 정리 중...")
+    delete_existing_target_items(page, account, items, recon_dir)
+
     print("\n[dup-check] 기등록 물품 확인 중...")
     registered_nos = get_registered_item_nos(page, account)
     print(f"  현재 접수/담기 {len(registered_nos)}건 확인됨")

@@ -86,8 +86,32 @@ def _find_header_row(rows: list) -> int:
     return best_row
 
 
+def _merge_duplicate_items(items: List[Dict]) -> List[Dict]:
+    """같은 물품번호가 여러 행에 있으면 수량을 합산해 한 번만 담도록 병합한다."""
+    merged = {}
+    order = []
+    for item in items:
+        no = item["no"]
+        if no not in merged:
+            merged[no] = dict(item)
+            merged[no]["rows"] = [item.get("row")]
+            order.append(no)
+            continue
+        merged[no]["qty"] += item["qty"]
+        merged[no]["rows"].append(item.get("row"))
+        if not merged[no].get("name") and item.get("name"):
+            merged[no]["name"] = item["name"]
+    out = [merged[no] for no in order]
+    duplicate_groups = [it for it in out if len(it.get("rows", [])) > 1]
+    if duplicate_groups:
+        print(f"  [merge] 같은 물품번호 {len(duplicate_groups)}종 병합")
+        for it in duplicate_groups:
+            print(f"    no={it['no']} rows={it['rows']} 합산수량={it['qty']} name={it.get('name','')}")
+    return out
+
+
 def _parse_rows(csv_text: str) -> List[Dict]:
-    """CSV 텍스트 → 정규화된 품목 dict 리스트."""
+    """CSV 텍스트 → 정규화된 품목 dict 리스트. 같은 물품번호는 수량 합산."""
     reader = csv.reader(io.StringIO(csv_text))
     rows = list(reader)
     if not rows:
@@ -135,7 +159,7 @@ def _parse_rows(csv_text: str) -> List[Dict]:
             continue
 
         items.append({"row": r_idx, "no": no, "qty": qty, "name": name})
-    return items
+    return _merge_duplicate_items(items)
 
 
 def load_items_from_sheet(sheet_url: str, sheet_name: str = "") -> List[Dict]:
