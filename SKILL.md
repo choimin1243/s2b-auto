@@ -1,110 +1,138 @@
 ---
-name: s2b
-description: "S2B(학교장터, www.s2b.kr) 자동화 스킬. 구글시트의 물품번호·수량 리스트를 받아 자동 로그인 → 검색 → 상세페이지 [담기] 까지 수행. s2b, 학교장터, 견적, 물품 자동담기 요청 시 사용."
+name: s2b-manual-login
+description: "Use when placing S2B(학교장터) items from a Google Sheet on Windows while keeping login fully manual. Opens a visible Playwright browser, waits for the user to log in, then automatically adds sheet items and writes verification artifacts."
+version: 1.0.0
+author: Hermes Agent
+license: MIT
+metadata:
+  hermes:
+    tags: [s2b, windows, playwright, google-sheets, procurement]
+    related_skills: [s2b]
 ---
 
-# S2B 자동화 스킬
+# S2B Manual Login Automation
 
-S2B(www.s2b.kr) 학교장터에서 구글시트 기반으로 물품을 자동 탐색·담기까지 수행한다. Playwright(Chromium) 사용. 로그인은 사용자 계정 종류(수요기관/개인이용자)와 관계없이 동작.
+## Overview
 
-## ⚠️ 매우 중요 — 사용 전 필독
+This repository automates S2B(학교장터) item placement from a Google Sheet or CSV **without receiving, storing, or typing the user's S2B password**.
 
-**개인이용자 계정**의 상세페이지 [담기] 버튼은 단순 장바구니가 아니라 **실제 견적서 접수**(공급업체에 견적요청 발송)이다. 한번 [담기] = 한번 견적 접수.
+The flow is intentionally human-in-the-loop:
 
-- **수요기관(학교) 계정**: 진짜 장바구니(`Tomu400.do`) 사용 가능 → 안전한 add/remove 가능
-- **개인이용자 계정**: 장바구니 미지원, [담기]는 즉시 견적접수 → **취소는 `선택물품함`에서 수동/자동 삭제 필요**
+1. CLI reads the Google Sheet and previews detected items.
+2. CLI opens a visible Chromium browser at S2B login.
+3. The user logs in manually in the browser.
+4. The user returns to the CLI and presses Enter.
+5. The script confirms login state, checks duplicates, adds items, and writes screenshots/HTML/report files.
 
-스킬 실행 전 사용자에게 계정 종류를 반드시 확인하고, 개인이용자라면 **1건만 dry-run** 후 사용자 승인을 받고 나머지 진행할 것.
+This is suitable for Windows PowerShell/cmd because all interaction happens through a normal visible browser and a standard CLI prompt.
 
-## 입력
+## When to Use
 
-1. **로그인 자격증명** — 다음 중 하나로 받는다. 코드/메모리에 저장 금지.
-   - 환경변수 `S2B_ID`, `S2B_PW`
-   - 같은 폴더의 `.env` 파일 (`S2B_ID=...` / `S2B_PW=...`)
-   - CLI 인자 `--id`, `--pw`
-   - 인자 모두 비면 `getpass`로 안전 입력 프롬프트
-2. **계정 종류** — `--account school|personal` (기본 personal)
-3. **품목 리스트** — 다음 중 하나
-   - 구글시트 URL: `--sheet "https://docs.google.com/spreadsheets/d/.../edit"`
-     (시트는 "공개 링크로 보기" 권한이거나 export csv 가능 상태여야 한다)
-   - 시트(탭) 이름 지정 시: `--sheet-name "발주_4월"` 추가 (gviz/tq CSV로 받음).
-     `--sheet-name` 미지정이면 URL의 `#gid` 또는 첫 시트.
-   - 로컬 CSV: `--csv path.csv`
-   - 시트 스키마: 헤더에 `물품번호`, `수량` 열 필수. `물품명`/`옵션`/`비고` 등은 무시되거나 로깅용
-4. **동작 모드** — `--mode dry|run` (기본 dry: 1건만)
+Use this when:
 
-## 실행
+- The user provides only a Google Sheet URL of S2B item numbers and quantities.
+- Login must be performed by the human user, not by the agent or stored credentials.
+- The user wants a Windows-compatible CLI workflow.
+- The task is to add items to S2B's estimate/cart flow and produce verification artifacts.
 
-```bash
-cd <skill_dir>
+Do **not** use this for:
+
+- Storing S2B credentials in code, `.env`, shell history, or Hermes memory.
+- Headless unattended login.
+- Final purchasing/contract approval; the user must still review S2B results.
+
+## Windows Setup
+
+Open PowerShell in the repository folder:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python -m playwright install chromium  # 1회
-
-# dry-run (1건만)
-python s2b_auto.py --sheet "<gsheet-url>" --account personal --mode dry
-
-# 전체 실행 (사용자 승인 후)
-python s2b_auto.py --sheet "<gsheet-url>" --account personal --mode run
+python -m playwright install chromium
 ```
 
-## 흐름 (자동화 단계)
+If `py` is unavailable, use `python` instead.
 
-1. **로그인**
-   - `https://www.s2b.kr/S2BNCustomer/Login.do` 진입
-   - 계정에 맞는 탭 활성화 (`a[href='#sclogin']` 또는 `a[href='#prlogin']`)
-   - 폼 입력: `form[name='<form>'] input[name='uid'|'pwd']`
-   - 제출: `page.evaluate("retrieveLogin2('<form>', <idx>)")` (school=1, personal=2)
-   - 비번변경 안내 페이지(`pwd_changeinfo.jsp`) 도달 시 `page.evaluate("modifyNext()")`
-   - 성공 판정: URL이 `Login.do`/`pwd_changeinfo`가 아님
+## Sheet Format
 
-2. **시트 → 품목 리스트 정규화**
-   - 헤더에서 `물품번호`/`수량` 열 인덱스 추출
-   - 빈 행, 물품번호 없는 행(예: 배송비) 자동 스킵
-   - 수량 정수 변환, 0/음수는 거부
+The first few rows are scanned for headers. Supported header names include:
 
-3. **품목별 처리**
-   - 상세페이지 직링크: `/S2BNCustomer/rema100.do?forwardName=detail&f_re_estimate_code={no}`
-   - 수량 입력: `#qnt`
-   - 담기 호출: `page.evaluate("fnSave()")`
-   - confirm("물품견적서를 접수하시겠습니까?")는 `page.on("dialog", ...)`로 자동 accept
-   - 새 popup 창(`remc100.do`)이 "견적서가 접수되었습니다." 표시
-   - 결과는 `recon/24_popup_<idx>.png`/.html 로 저장 (검증용)
+- Item number: `물품번호`, `상품번호`, `S2B번호`, `품번`, `물품코드`, `제품번호`
+- Quantity: `수량`, `qty`, `quantity`, `주문수량`, `발주수량`, `요청수량`, `개수`
+- Name: `물품명`, `품명`, `상품명`, `name`, `품목명`, `제품명`
 
-4. **검증 (개인이용자)**
-   - `https://www.s2b.kr/S2BNCustomer/remc100.do?forwardName=estimateList` 로 이동
-   - HTML에 우리 물품번호가 존재하는지 검사 → 모두 존재하면 PASS
+Rows with blank item numbers are skipped. Quantity must parse to a positive integer.
 
-5. **검증 (수요기관)**
-   - `https://www.s2b.kr/S2BNCustomer/Tomu400.do?forwardName=list` 로 이동
-   - 행 파싱하여 입력 vs 실제 diff (물품번호+수량 모두 일치)
+## Commands
 
-## 산출물
+### 1. Preview the Google Sheet only
 
-- `recon/*.png`, `recon/*.html` — 단계별 스크린샷·DOM
-- `recon/trace.zip` — Playwright trace (`playwright show-trace recon/trace.zip`)
-- `output/리포트_YYYYMMDD_HHMM.html` — 사람이 읽기 좋은 결과 표
-- `storage_state.json` — 다음 실행 시 세션 재사용 (만료되면 자동 재로그인)
+No browser and no login:
 
-## 주의
+```powershell
+python s2b_auto.py --sheet "https://docs.google.com/spreadsheets/d/.../edit?gid=0#gid=0" --preview-only
+```
 
-- 로그인 정보는 절대 코드/메모리/리포트에 기록하지 않는다.
-- 구글시트의 행에 토큰/비밀번호가 우연히 들어있을 수 있으니, 시트 첫 1회 읽기 후 데이터 미리보기를 사용자에게 보여주고 진행한다.
-- 같은 계정으로 여러 곳에서 동시 로그인 시 세션 충돌 가능 → 사용자 양해 필요.
-- S2B는 EUC-KR 페이지가 일부 있다. urllib로 직접 받을 때는 `decode('euc-kr', errors='replace')`.
+### 2. Safe first run: one item only
 
-## 셀렉터·URL 레퍼런스 (트러블슈팅용)
+This opens the browser, waits for manual login, then adds only the first detected item:
 
-| 단계 | URL/셀렉터 |
-|---|---|
-| 로그인 | `/S2BNCustomer/Login.do` |
-| 탭 활성화 | `a[href='#sclogin']` / `a[href='#prlogin']` / `a[href='#splogin']` |
-| 로그인 폼 | `form[name='school_loginForm'/'personal_loginForm'/'vendor_loginForm']` |
-| ID/PW 인풋 | `input[name='uid']`, `input[name='pwd']` (각 폼 안) |
-| 제출 함수 | `retrieveLogin2('<form>', <1\|2\|3>)` |
-| 비번변경 패스 | `modifyNext()` |
-| 검색 | `/S2BNCustomer/S2B/scrweb/remu/rema/searchengine/s2bCustomerSearch.jsp?actionType=MAIN_SEARCH&searchQuery={no}&...&locationGbn=all` |
-| 상세 | `/S2BNCustomer/rema100.do?forwardName=detail&f_re_estimate_code={no}` |
-| 수량 인풋 | `#qnt` |
-| 담기 함수 | `fnSave()` (개인이용자에선 견적 접수임) |
-| 접수내역(개인) | `/S2BNCustomer/remc100.do?forwardName=estimateList` |
-| 장바구니(학교) | `/S2BNCustomer/Tomu400.do?forwardName=list` |
+```powershell
+python s2b_auto.py --sheet "https://docs.google.com/spreadsheets/d/.../edit?gid=0#gid=0" --account personal --mode dry --manual-login-then-headless
+```
+
+### 3. Full run
+
+After the one-item test is correct:
+
+```powershell
+python s2b_auto.py --sheet "https://docs.google.com/spreadsheets/d/.../edit?gid=0#gid=0" --account personal --mode run --manual-login-then-headless
+```
+
+For a school/institution account, use:
+
+```powershell
+python s2b_auto.py --sheet "<sheet-url>" --account school --mode run --manual-login-then-headless
+```
+
+## Runtime Flow
+
+When the script starts a real run:
+
+1. A Chromium browser opens at `https://www.s2b.kr/S2BNCustomer/Login.do`.
+2. If `--account personal` is set, the script tries to select the personal login tab.
+3. The CLI prints:
+   `로그인이 완료되었으면 Enter를 누르세요...`
+4. The user logs in manually in the browser.
+5. The user presses Enter in the CLI.
+6. If the page still looks like the login page, the script asks again until `--login-timeout` expires.
+7. After login, the script saves `storage_state.json`.
+8. With `--manual-login-then-headless`, the visible login browser closes and a headless browser continues the automatic add/verify flow.
+9. After login/session handoff, the script checks existing estimate/cart items and skips already-present item numbers.
+10. For each remaining item, it opens the detail page, sets `#qnt`, calls `fnSave()`, accepts S2B dialogs, and verifies in the estimate/cart list.
+
+## Outputs
+
+Generated under `--workdir` (default: current folder):
+
+- `recon/*.png` and `recon/*.html`: page snapshots for verification/troubleshooting.
+- `recon/trace.zip`: Playwright trace (`playwright show-trace recon/trace.zip`).
+- `output/리포트_YYYYMMDD_HHMM.html`: summary report with item-level result and verification status.
+
+## Important Safety Notes
+
+- Do not pass `--id`, `--pw`, environment variables, or `.env` credentials. This version intentionally has no credential arguments.
+- Do not run the same full sheet twice without checking S2B. The duplicate pre-check skips known item numbers, but users should still review the S2B estimate/cart list.
+- `--headless` is only for `--use-session` runs. For one-command manual login handoff, use `--manual-login-then-headless`.
+- `--mode dry` still performs a real one-item add after login. Use `--preview-only` if you only want parsing.
+- For personal accounts, S2B may treat `[담기]` as estimate reception rather than a harmless shopping cart. Always do the one-item dry run first.
+
+## Verification Checklist
+
+- [ ] `python -m py_compile s2b_auto.py sheet_reader.py` passes.
+- [ ] `python s2b_auto.py --sheet "<sheet-url>" --preview-only` detects the expected rows.
+- [ ] `python s2b_auto.py --help` shows no credential options.
+- [ ] A visible browser opens for `--mode dry`.
+- [ ] Login is performed manually by the user.
+- [ ] The report file and `recon/30_verify_list.*` artifacts are created after a real run.

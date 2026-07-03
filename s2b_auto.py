@@ -1,18 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-S2B 자동화 — 로그인 → 중복확인 → 검색 → 상세 → [담기] (수량 입력 + fnSave) → 검증.
+S2B 자동화 — 구글시트/CSV 로드 → 사용자가 브라우저에서 직접 로그인 →
+중복확인 → 상세페이지 [담기] (수량 입력 + fnSave) → 검증.
 
 사용:
-  python s2b_auto.py --sheet "<gsheet-url>" --account personal --mode dry
-  python s2b_auto.py --csv items.csv --account school --mode run
+  python s2b_auto.py --sheet "<gsheet-url>" --account personal --preview-only
+  python s2b_auto.py --sheet "<gsheet-url>" --account personal --mode run
+  python s2b_auto.py --csv items.csv --account school --mode dry
 
-자격증명 우선순위: --id/--pw > 환경변수 S2B_ID/S2B_PW > .env > 인터랙티브 입력.
-자격증명은 메모리·로그·리포트에 기록하지 않는다.
+기본값은 수동 로그인이다. 프로그램이 브라우저를 열면 사용자가 직접 S2B에 로그인하고,
+로그인이 끝난 뒤 CLI에서 Enter를 누르면 세션을 저장하고, 옵션에 따라 보이는 창을 닫은 뒤
+headless 브라우저로 전환해 물품을 담는다.
+아이디/비밀번호를 코드, 명령행, 환경변수, 리포트, 로그에 저장하지 않는다.
 """
 import argparse
-import getpass
 import io
-import json
 import os
 import re
 import sys
@@ -48,27 +50,103 @@ ACCOUNT_MAP = {
     "personal": {"tab": "#prlogin", "form": "personal_loginForm", "idx": 2},
 }
 
-# ---------------- 자격증명 로더 ----------------
-def load_credentials(args) -> tuple:
-    """우선순위: CLI > env > .env > prompt. 어디에도 저장하지 않음."""
-    sid = args.id or os.environ.get("S2B_ID")
-    spw = args.pw or os.environ.get("S2B_PW")
+# ---------------- 로그인 보조 ----------------
+def install_dialog_auto_accept(page):
+    """S2B confirm/alert 창을 기록하고 자동 확인한다. 비밀번호는 다루지 않는다."""
+    dialog_log = []
 
-    env_path = Path(__file__).parent / ".env"
-    if (not sid or not spw) and env_path.exists():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and "=" in line and not line.startswith("#"):
-                k, v = line.split("=", 1)
-                k = k.strip(); v = v.strip()
-                if k == "S2B_ID" and not sid: sid = v
-                if k == "S2B_PW" and not spw: spw = v
+    def _accept(dialog):
+        dialog_log.append((dialog.type, dialog.message))
+        print(f"  [dialog:{dialog.type}] {dialog.message[:120]}")
+        dialog.accept()
 
-    if not sid:
-        sid = input("S2B 아이디: ").strip()
-    if not spw:
-        spw = getpass.getpass("S2B 비밀번호: ")
-    return sid, spw
+    page.on("dialog", _accept)
+    return dialog_log
+
+
+def is_logged_in(page) -> bool:
+    """현재 페이지가 로그인 완료 상태인지 보수적으로 판정한다."""
+    url = page.url or ""
+    if "Login.do" in url or "pwd_changeinfo" in url:
+        return False
+    try:
+        if page.locator("form[name='personal_loginForm'], form[name='school_loginForm']").count() > 0:
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _wait_for_enter(timeout_seconds: int) -> bool:
+    """Enter 입력을 timeout 동안 기다린다. Windows와 Unix 모두 지원."""
+    prompt = "로그인이 완료되었으면 Enter를 누르세요... "
+    print(prompt, end="", flush=True)
+    if os.name == "nt":
+        import msvcrt
+        start = time.time()
+        while time.time() - start < timeout_seconds:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                if ch in ("\r", "\n"):
+                    print()
+                    return True
+            time.sleep(0.1)
+        print()
+        return False
+
+    import select
+    ready, _, _ = select.select([sys.stdin], [], [], timeout_seconds)
+    if not ready:
+        print()
+        return False
+    sys.stdin.readline()
+    return True
+
+
+def manual_login(page, account: str, recon_dir: Path, timeout_seconds: int = 300) -> bool:
+    """브라우저를 열어 사용자가 직접 로그인하게 하고, Enter 이후 로그인 상태를 검증한다."""
+    print(f"[login] manual account={account}")
+    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+    time.sleep(0.5)
+
+    cfg = ACCOUNT_MAP[account]
+    if cfg["tab"] != "#sclogin":
+        try:
+            page.locator(f"a[href='{cfg['tab']}']").first.click()
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"  탭 클릭 실패(수동으로 선택 가능): {e}")
+
+    print("\n=== 수동 로그인 필요 ===")
+    print("1) 열린 브라우저에서 S2B 아이디/비밀번호를 직접 입력해 로그인하세요.")
+    print("2) 비밀번호 변경 안내/알림이 나오면 사용자가 직접 처리하거나 다음에 변경을 누르세요.")
+    print("3) 로그인 완료 후 이 CLI 창으로 돌아와 Enter를 누르세요.")
+    print(f"   제한시간: {timeout_seconds}초")
+
+    start = time.time()
+    while True:
+        remaining = max(0, int(timeout_seconds - (time.time() - start)))
+        if remaining == 0:
+            print("!! 수동 로그인 대기 시간이 초과되었습니다.")
+            snap(page, "10_manual_login_timeout", recon_dir)
+            return False
+        # 사용자가 엔터를 눌러 명시적으로 이어가게 한다. Windows PowerShell/cmd에서도 동작.
+        if not _wait_for_enter(remaining):
+            print("!! 수동 로그인 대기 시간이 초과되었습니다.")
+            snap(page, "10_manual_login_timeout", recon_dir)
+            return False
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except PWTimeout:
+            pass
+        time.sleep(0.5)
+        snap(page, "10_after_manual_login", recon_dir)
+        ok = is_logged_in(page)
+        print(f"[login] manual success={ok} url={page.url}")
+        if ok:
+            return True
+        print("아직 로그인 화면으로 보입니다. 브라우저에서 로그인을 완료한 뒤 다시 Enter를 누르세요.")
+        print(f"남은 시간: {remaining}초")
 
 # ---------------- 유틸 ----------------
 def snap(page, name, root: Path):
@@ -82,53 +160,6 @@ def snap(page, name, root: Path):
     except Exception:
         pass
     print(f"  [snap] {name}")
-
-# ---------------- 로그인 ----------------
-def login(page, account: str, sid: str, spw: str, recon_dir: Path) -> bool:
-    cfg = ACCOUNT_MAP[account]
-    print(f"[login] account={account} ({cfg['form']})")
-    page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-    time.sleep(0.5)
-
-    dialog_log = []
-    page.on("dialog", lambda d: (dialog_log.append((d.type, d.message)), d.accept()))
-
-    if cfg["tab"] != "#sclogin":
-        try:
-            page.locator(f"a[href='{cfg['tab']}']").first.click()
-            time.sleep(0.3)
-        except Exception as e:
-            print(f"  탭 클릭 실패: {e}")
-
-    page.locator(f"form[name='{cfg['form']}'] input[name='uid']").fill(sid)
-    page.locator(f"form[name='{cfg['form']}'] input[name='pwd']").fill(spw)
-    page.evaluate(f"retrieveLogin2('{cfg['form']}', {cfg['idx']})")
-
-    try:
-        page.wait_for_load_state("networkidle", timeout=10000)
-    except PWTimeout:
-        pass
-    time.sleep(1)
-    snap(page, "10_after_login", recon_dir)
-
-    for dtype, msg in dialog_log:
-        if "실패" in msg:
-            print(f"  !! 로그인 실패: {msg[:80]}")
-            return False
-
-    if "pwd_changeinfo" in page.url:
-        print("  pwd_changeinfo → modifyNext()")
-        try:
-            page.evaluate("modifyNext()")
-            page.wait_for_load_state("networkidle", timeout=10000)
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"  modifyNext 실패: {e}")
-        snap(page, "11_after_pw_skip", recon_dir)
-
-    ok = ("Login.do" not in page.url) and ("pwd_changeinfo" not in page.url)
-    print(f"[login] success={ok} url={page.url}")
-    return ok
 
 # ---------------- 중복 확인 ----------------
 def get_registered_item_nos(page, account: str) -> set:
@@ -251,6 +282,46 @@ th{{background:#f0f0f0}}</style></head>
     f.write_text(html, encoding="utf-8")
     return f
 
+def run_automation(page, account: str, items: list, recon_dir: Path, out_dir: Path) -> Path:
+    """로그인된 page에서 중복 확인 → 담기 → 검증 → 리포트까지 실행한다."""
+    print("\n[dup-check] 기등록 물품 확인 중...")
+    registered_nos = get_registered_item_nos(page, account)
+    print(f"  현재 접수/담기 {len(registered_nos)}건 확인됨")
+    snap(page, "15_precheck_list", recon_dir)
+
+    results = []
+    for i, it in enumerate(items, 1):
+        if it["no"] in registered_nos:
+            print(f"  [skip-dup] no={it['no']} name={it.get('name','')} → 이미 등록됨, 건너뜀")
+            results.append({
+                "idx": i, "no": it["no"], "qty": it["qty"],
+                "name": it.get("name", ""), "status": "SKIP",
+                "reason": "이미 접수/담기됨 (중복 방지)"
+            })
+            continue
+        results.append(add_one(page, it, i, recon_dir))
+
+    found = verify(page, account, items, recon_dir)
+
+    # CHECK 상태 재판정: 팝업 캡처 실패했지만 접수내역에 있으면 OK
+    for r in results:
+        if r["status"] == "CHECK":
+            if found.get(r["no"]):
+                r["status"] = "OK"
+                r["reason"] = "팝업 캡처 실패했으나 접수내역에서 확인됨"
+            else:
+                r["status"] = "FAIL"
+
+    report = write_report(out_dir, results, found, account)
+    print(f"\n[report] {report}")
+
+    ok_cnt = sum(1 for r in results if r["status"] == "OK" and found.get(r["no"]))
+    skip_cnt = sum(1 for r in results if r["status"] == "SKIP")
+    fail_cnt = sum(1 for r in results if r["status"] == "FAIL")
+    print(f"[summary] OK={ok_cnt}  SKIP(중복)={skip_cnt}  FAIL={fail_cnt}  / 총{len(results)}건")
+    return report
+
+
 # ---------------- 메인 ----------------
 def main():
     ap = argparse.ArgumentParser()
@@ -260,10 +331,20 @@ def main():
     ap.add_argument("--csv", help="로컬 CSV 경로")
     ap.add_argument("--account", choices=["school", "personal"], default="personal")
     ap.add_argument("--mode", choices=["dry", "run"], default="dry",
-                    help="dry=첫 1건만 / run=전체")
-    ap.add_argument("--id", help="S2B 아이디 (안전상 환경변수/프롬프트 권장)")
-    ap.add_argument("--pw", help="S2B 비밀번호 (안전상 환경변수/프롬프트 권장)")
-    ap.add_argument("--headless", action="store_true", help="브라우저 숨김")
+                    help="dry=로그인 후 첫 1건만 담아 검증 / run=전체 담기")
+    ap.add_argument("--preview-only", action="store_true",
+                    help="브라우저/로그인 없이 시트 파싱 결과만 확인")
+    ap.add_argument("--login-timeout", type=int, default=300,
+                    help="수동 로그인 완료 대기 시간(초), 기본 300")
+    ap.add_argument("--login-only", action="store_true",
+                    help="수동 로그인 후 세션 파일만 저장하고 종료")
+    ap.add_argument("--use-session", action="store_true",
+                    help="이미 저장된 세션 파일로 로그인 없이 실행")
+    ap.add_argument("--manual-login-then-headless", action="store_true",
+                    help="수동 로그인 세션을 저장한 뒤 브라우저를 닫고 headless로 자동 담기")
+    ap.add_argument("--session-file", default="",
+                    help="Playwright 세션 파일 경로(기본: --workdir/storage_state.json)")
+    ap.add_argument("--headless", action="store_true", help="--use-session 실행 시 브라우저 숨김")
     ap.add_argument("--workdir", default=".", help="recon/output 저장 위치 (기본 현재 폴더)")
     args = ap.parse_args()
 
@@ -286,68 +367,79 @@ def main():
         print("!! 품목 0건. 종료.")
         return
 
-    if args.mode == "dry":
-        items = items[:1]
-        print(f"[mode] dry-run → 1건만 진행")
-
-    # 2) 자격증명 로드
-    sid, spw = load_credentials(args)
-    if not sid or not spw:
-        print("!! 자격증명 누락. 종료.")
+    if args.preview_only:
+        print("[preview-only] 로그인/브라우저 실행 없이 시트 파싱만 확인하고 종료합니다.")
         return
 
-    # 3) 자동화
-    storage_state = workdir / "storage_state.json"
+    if args.mode == "dry":
+        items = items[:1]
+        print(f"[mode] dry → 로그인 후 1건만 담아 검증")
+
+    session_file = Path(args.session_file).expanduser() if args.session_file else workdir / "storage_state.json"
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.headless and not args.use_session:
+        ap.error("--headless는 --use-session 실행에서만 사용하세요. 수동 로그인 창은 항상 표시됩니다.")
+    if args.manual_login_then_headless and args.login_only:
+        ap.error("--manual-login-then-headless 와 --login-only 는 함께 사용할 수 없습니다.")
+    if args.use_session and not session_file.exists():
+        ap.error(f"세션 파일이 없습니다: {session_file}. 먼저 --login-only 또는 --manual-login-then-headless를 실행하세요.")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, slow_mo=50)
+        if args.use_session:
+            print(f"[session] 저장된 세션 사용: {session_file}")
+            browser = p.chromium.launch(headless=args.headless, slow_mo=50)
+            ctx = browser.new_context(
+                viewport={"width": 1440, "height": 900},
+                locale="ko-KR",
+                storage_state=str(session_file),
+            )
+            ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
+            page = ctx.new_page()
+            install_dialog_auto_accept(page)
+            try:
+                run_automation(page, args.account, items, recon_dir, out_dir)
+            finally:
+                ctx.tracing.stop(path=str(recon_dir / "trace.zip"))
+                browser.close()
+            return
+
+        # 2) 수동 로그인 창 실행 및 세션 저장
+        browser = p.chromium.launch(headless=False, slow_mo=50)
         ctx = browser.new_context(viewport={"width": 1440, "height": 900}, locale="ko-KR")
+        page = ctx.new_page()
+        install_dialog_auto_accept(page)
+        try:
+            ok = manual_login(page, args.account, recon_dir, args.login_timeout)
+            if not ok:
+                print("!! 수동 로그인 확인 실패. 종료.")
+                return
+            ctx.storage_state(path=str(session_file))
+            print(f"[session] 로그인 세션 저장: {session_file}")
+        finally:
+            browser.close()
+
+        if args.login_only:
+            print("[login-only] 세션 저장 후 종료합니다.")
+            return
+
+        if args.manual_login_then_headless:
+            print("[handoff] 수동 로그인 창을 닫고 headless 자동 담기로 전환합니다.")
+            browser = p.chromium.launch(headless=True, slow_mo=50)
+        else:
+            print("[handoff] 저장된 세션으로 새 브라우저를 열어 자동 담기를 진행합니다.")
+            browser = p.chromium.launch(headless=False, slow_mo=50)
+
+        ctx = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            locale="ko-KR",
+            storage_state=str(session_file),
+        )
         ctx.tracing.start(screenshots=True, snapshots=True, sources=True)
         page = ctx.new_page()
+        install_dialog_auto_accept(page)
         try:
-            ok = login(page, args.account, sid, spw, recon_dir)
-            if not ok:
-                print("!! 로그인 실패. 종료.")
-                return
-            ctx.storage_state(path=str(storage_state))
-
-            # 중복 방지: 로그인 직후 기등록 물품 확인
-            print("\n[dup-check] 기등록 물품 확인 중...")
-            registered_nos = get_registered_item_nos(page, args.account)
-            print(f"  현재 접수/담기 {len(registered_nos)}건 확인됨")
-            snap(page, "15_precheck_list", recon_dir)
-
-            results = []
-            for i, it in enumerate(items, 1):
-                if it["no"] in registered_nos:
-                    print(f"  [skip-dup] no={it['no']} name={it.get('name','')} → 이미 등록됨, 건너뜀")
-                    results.append({
-                        "idx": i, "no": it["no"], "qty": it["qty"],
-                        "name": it.get("name", ""), "status": "SKIP",
-                        "reason": "이미 접수/담기됨 (중복 방지)"
-                    })
-                    continue
-                results.append(add_one(page, it, i, recon_dir))
-
-            # 최종 검증
-            non_skip_items = [it for it in items if it["no"] not in registered_nos]
-            found = verify(page, args.account, items, recon_dir)
-
-            # CHECK 상태 재판정: 팝업 캡처 실패했지만 접수내역에 있으면 OK
-            for r in results:
-                if r["status"] == "CHECK":
-                    if found.get(r["no"]):
-                        r["status"] = "OK"
-                        r["reason"] = "팝업 캡처 실패했으나 접수내역에서 확인됨"
-                    else:
-                        r["status"] = "FAIL"
-
-            report = write_report(out_dir, results, found, args.account)
-            print(f"\n[report] {report}")
-
-            ok_cnt   = sum(1 for r in results if r["status"] == "OK" and found.get(r["no"]))
-            skip_cnt = sum(1 for r in results if r["status"] == "SKIP")
-            fail_cnt = sum(1 for r in results if r["status"] == "FAIL")
-            print(f"[summary] OK={ok_cnt}  SKIP(중복)={skip_cnt}  FAIL={fail_cnt}  / 총{len(results)}건")
+            run_automation(page, args.account, items, recon_dir, out_dir)
         finally:
             ctx.tracing.stop(path=str(recon_dir / "trace.zip"))
             browser.close()
