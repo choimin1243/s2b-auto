@@ -143,8 +143,14 @@ def _wait_for_enter(timeout_seconds: int) -> bool:
     return True
 
 
-def manual_login(page, account: str, recon_dir: Path, timeout_seconds: int = 300) -> bool:
-    """브라우저를 열어 사용자가 직접 로그인하게 하고, 로그인 완료를 자동 감지한다."""
+def manual_login(
+    page,
+    account: str,
+    recon_dir: Path,
+    timeout_seconds: int = 300,
+    confirm_file: Path | None = None,
+) -> bool:
+    """브라우저를 열어 사용자가 직접 로그인하게 하고, 로그인 완료를 감지한다."""
     print(f"[login] manual account={account}")
     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
     time.sleep(0.5)
@@ -161,6 +167,8 @@ def manual_login(page, account: str, recon_dir: Path, timeout_seconds: int = 300
     print("1) 열린 브라우저에서 S2B 아이디/비밀번호를 직접 입력해 로그인하세요.")
     print("2) 비밀번호 변경 안내/알림이 나오면 사용자가 직접 처리하거나 다음에 변경을 누르세요.")
     print("3) 로그인 완료가 감지되면 Enter 없이 자동으로 다음 단계로 진행합니다.")
+    if confirm_file:
+        print(f"   또는 로그인 완료 후 확인 파일을 만들면 진행합니다: {confirm_file}")
     print(f"   제한시간: {timeout_seconds}초")
 
     start = time.time()
@@ -175,6 +183,10 @@ def manual_login(page, account: str, recon_dir: Path, timeout_seconds: int = 300
         if ok:
             snap(page, "10_after_manual_login", recon_dir)
             print(f"[login] manual success=True url={page.url}")
+            return True
+        if confirm_file and confirm_file.exists():
+            snap(page, "10_after_manual_login_confirmed", recon_dir)
+            print(f"[login] manual confirmed by file: {confirm_file} url={page.url}")
             return True
         if time.time() - last_notice >= 5:
             print(f"[login] 로그인 대기 중... 남은 시간: {remaining}초")
@@ -495,6 +507,8 @@ def main():
                     help="수동 로그인 세션을 저장한 뒤 브라우저를 닫고 headless로 자동 담기")
     ap.add_argument("--session-file", default="",
                     help="Playwright 세션 파일 경로(기본: --workdir/storage_state.json)")
+    ap.add_argument("--login-confirm-file", default="",
+                    help="이 파일이 생기면 수동 로그인 완료로 보고 세션 저장 후 진행")
     ap.add_argument("--headless", action="store_true", help="--use-session 실행 시 브라우저 숨김")
     ap.add_argument("--workdir", default=".", help="recon/output 저장 위치 (기본 현재 폴더)")
     args = ap.parse_args()
@@ -562,7 +576,8 @@ def main():
         page = ctx.new_page()
         install_dialog_auto_accept(page)
         try:
-            ok = manual_login(page, args.account, recon_dir, args.login_timeout)
+            confirm_file = Path(args.login_confirm_file).resolve() if args.login_confirm_file else None
+            ok = manual_login(page, args.account, recon_dir, args.login_timeout, confirm_file)
             if not ok:
                 print("!! 수동 로그인 확인 실패. 종료.")
                 return
