@@ -27,7 +27,7 @@ python s2b_auto.py --sheet "https://docs.google.com/spreadsheets/d/.../edit?gid=
 python s2b_auto.py --sheet "https://docs.google.com/spreadsheets/d/.../edit?gid=0#gid=0" --account personal --mode dry --manual-login-then-headless
 ```
 
-브라우저가 열리면 사용자가 직접 로그인하고, CLI 창에서 Enter를 누릅니다. 그러면 로그인 창은 닫히고 저장된 세션으로 headless 자동 담기가 이어집니다.
+브라우저가 열리면 사용자가 직접 로그인합니다. 로그인 완료가 자동 감지되면 바로 진행됩니다. 자동 감지가 안 되면 실행 폴더에 자동 생성되는 `login_done.bat`를 더블클릭하세요. 그러면 로그인 창은 닫히고 저장된 세션으로 headless 자동 담기가 이어집니다.
 
 ### 3) 전체 실행
 
@@ -40,6 +40,7 @@ python s2b_auto.py --sheet "https://docs.google.com/spreadsheets/d/.../edit?gid=
 - 이 버전은 `--id`, `--pw` 옵션이 없습니다. 아이디/비밀번호를 코드나 명령행에 저장하지 않습니다.
 - `--mode dry`는 로그인 후 첫 1건을 실제로 담아 검증합니다. 파싱만 보려면 `--preview-only`를 사용하세요.
 - `--manual-login-then-headless`: 로그인만 보이는 브라우저에서 하고 이후 headless 자동 담기로 전환합니다.
+- 로그인 완료 확인용 `login_done.signal`과 `login_done.bat`는 실행할 때 자동으로 준비됩니다. 필요하면 `--login-confirm-file`로 다른 신호 파일 경로를 지정할 수 있습니다.
 - `--login-only`: 로그인 세션만 저장합니다.
 - `--use-session --headless`: 저장된 세션으로 로그인 없이 headless 실행합니다.
 - 같은 물품번호가 여러 행에 있으면 수량을 합산해 한 번만 담습니다.

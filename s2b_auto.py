@@ -168,7 +168,8 @@ def manual_login(
     print("2) 비밀번호 변경 안내/알림이 나오면 사용자가 직접 처리하거나 다음에 변경을 누르세요.")
     print("3) 로그인 완료가 감지되면 Enter 없이 자동으로 다음 단계로 진행합니다.")
     if confirm_file:
-        print(f"   또는 로그인 완료 후 확인 파일을 만들면 진행합니다: {confirm_file}")
+        print("4) 자동 감지가 안 되면 login_done.bat를 더블클릭하거나 아래 파일을 만들면 진행합니다.")
+        print(f"   확인 파일: {confirm_file}")
     print(f"   제한시간: {timeout_seconds}초")
 
     start = time.time()
@@ -205,6 +206,36 @@ def snap(page, name, root: Path):
     except Exception:
         pass
     print(f"  [snap] {name}")
+
+
+def prepare_login_confirm_file(workdir: Path, confirm_file_arg: str = "") -> Path:
+    """로그인 완료를 사용자가 명시할 수 있는 신호 파일과 helper bat를 준비한다."""
+    confirm_file = (
+        Path(confirm_file_arg).expanduser().resolve()
+        if confirm_file_arg
+        else workdir / "login_done.signal"
+    )
+    confirm_file.parent.mkdir(parents=True, exist_ok=True)
+    if confirm_file.exists():
+        confirm_file.unlink()
+
+    helper = workdir / "login_done.bat"
+    helper.write_text(
+        "\n".join(
+            [
+                "@echo off",
+                "chcp 65001 > nul",
+                f"> \"{confirm_file}\" echo done",
+                "echo 로그인 완료 신호를 만들었습니다.",
+                "echo 자동화 창으로 돌아가 진행 상태를 확인하세요.",
+                "pause",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    print(f"[login] 완료 신호 helper 준비: {helper}")
+    return confirm_file
 
 
 def read_registered_nos_from_current_page(page, target_nos=None) -> set:
@@ -508,7 +539,7 @@ def main():
     ap.add_argument("--session-file", default="",
                     help="Playwright 세션 파일 경로(기본: --workdir/storage_state.json)")
     ap.add_argument("--login-confirm-file", default="",
-                    help="이 파일이 생기면 수동 로그인 완료로 보고 세션 저장 후 진행")
+                    help="이 파일이 생기면 수동 로그인 완료로 보고 세션 저장 후 진행(기본: workdir/login_done.signal)")
     ap.add_argument("--headless", action="store_true", help="--use-session 실행 시 브라우저 숨김")
     ap.add_argument("--workdir", default=".", help="recon/output 저장 위치 (기본 현재 폴더)")
     args = ap.parse_args()
@@ -576,7 +607,7 @@ def main():
         page = ctx.new_page()
         install_dialog_auto_accept(page)
         try:
-            confirm_file = Path(args.login_confirm_file).resolve() if args.login_confirm_file else None
+            confirm_file = prepare_login_confirm_file(workdir, args.login_confirm_file)
             ok = manual_login(page, args.account, recon_dir, args.login_timeout, confirm_file)
             if not ok:
                 print("!! 수동 로그인 확인 실패. 종료.")
