@@ -171,19 +171,15 @@ def manual_login(page, account: str, recon_dir: Path, timeout_seconds: int = 300
             print("!! 수동 로그인 대기 시간이 초과되었습니다.")
             snap(page, "10_manual_login_timeout", recon_dir)
             return False
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=1000)
-        except PWTimeout:
-            pass
         ok = is_logged_in(page)
         if ok:
             snap(page, "10_after_manual_login", recon_dir)
             print(f"[login] manual success=True url={page.url}")
             return True
-        if time.time() - last_notice >= 10:
+        if time.time() - last_notice >= 5:
             print(f"[login] 로그인 대기 중... 남은 시간: {remaining}초")
             last_notice = time.time()
-        time.sleep(1)
+        time.sleep(0.2)
 
 # ---------------- 유틸 ----------------
 def snap(page, name, root: Path):
